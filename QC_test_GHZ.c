@@ -165,10 +165,10 @@ static void write_log(const char* path, const char* qasm, const char* host,
     fprintf(L, "  MPI ranks      : %d\n\n", q.numNodes);
 
     fprintf(L, "[timing (sec)]\n");
-    fprintf(L, "  parse + alloc  : %8.3f\n", tInit);
-    fprintf(L, "  gates          : %8.3f\n", tCirc);
-    fprintf(L, "  dump (gzip -1) : %8.3f\n", tDump);
-    fprintf(L, "  total wall     : %8.3f\n\n", tTotal);
+    fprintf(L, "  setup (parse+alloc) : %8.3f\n", tInit);
+    fprintf(L, "  simulation (gates)  : %8.3f   <-- main benchmark metric\n", tCirc);
+    fprintf(L, "  output (dump+gzip)  : %8.3f\n", tDump);
+    fprintf(L, "  total wall          : %8.3f\n\n", tTotal);
 
     fprintf(L, "[verification]\n");
     fprintf(L, "  input qasm     : %s\n", qasm);
