@@ -86,7 +86,7 @@ fi
 # Step 3: build our user binary
 echo "==> Building QC_test_GHZ ($mode, $CC)"
 RPATH="$(cd "$B" && pwd)"
-$CC -O3 -std=c11 $USE_MPI \
+$CC -O3 -std=gnu11 $USE_MPI \
     -I"$Q/quest/include" -I"$Q" -I"$B" \
     QC_test_GHZ.c \
     -L"$B" -lQuEST -Wl,-rpath,"$RPATH" $CXX_RUNTIME -lm \

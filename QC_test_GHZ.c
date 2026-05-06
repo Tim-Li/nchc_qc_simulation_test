@@ -1,13 +1,5 @@
 /* QC_test_GHZ.c — GHZ statevector benchmark for QuEST.
- *
- * Reads OpenQASM 2.0 (h, cx; ignores include/creg/measure), simulates with
- * complex128, dumps the full statevector per MPI rank, and checks
- *     max |amp - GHZ_ref|  <=  1e-8
- * against the analytical reference  amp[0] = amp[2^N-1] = 1/sqrt(2).
- *
- * Build:    see README.md / build.sh
- * Run:      ./QC_test_GHZ <input.qasm> <output_dir>
- *           mpirun -np <N> ./QC_test_GHZ <input.qasm> <output_dir>
+ * See README.md for build / run / acceptance details.
  */
 
 #include "quest.h"
@@ -53,10 +45,10 @@ static const char* backend_str(int omp, int gpu, int mpi) {
 }
 
 /* ---- 1. parse OpenQASM 2.0 + apply gates ---- */
-static Qureg parse_and_run(const char* qasm, int* nQ, long* nGates,
+static Qureg parse_and_run(const char* qasm, long* nGates,
                            double* tInit, double* tCirc) {
     FILE* f = fopen(qasm, "r"); if (!f) { perror(qasm); exit(1); }
-    Qureg q = {0}; int ready = 0, ln = 0; char line[1024];
+    Qureg q; int ready = 0, ln = 0; char line[1024];
     *tInit = *tCirc = 0; *nGates = 0;
 
     while (fgets(line, sizeof line, f)) {
@@ -71,7 +63,6 @@ static Qureg parse_and_run(const char* qasm, int* nQ, long* nGates,
 
         int a, b;
         if (sscanf(s,"qreg q[%d];",&a) == 1) {
-            *nQ = a;
             double t0 = now();
             q = createQureg(a); initZeroState(q);
             *tInit = now() - t0; ready = 1; continue;
@@ -90,10 +81,10 @@ static Qureg parse_and_run(const char* qasm, int* nQ, long* nGates,
 }
 
 /* ---- 2. dump local slice; in the same pass, accumulate local maxErr ---- */
-static void dump_and_check(Qureg q, int nQ, const char* host, const char* gzPath,
+static void dump_and_check(Qureg q, const char* host, const char* gzPath,
                            double* tDump, double* maxErr, qindex* maxErrIdx) {
     syncQuregFromGpu(q);   /* no-op when no GPU */
-    qindex Ntot       = (qindex)1 << nQ;
+    qindex Ntot       = (qindex)1 << q.numQubits;
     qindex localCount = q.numAmpsPerNode;
     qindex localStart = (qindex)q.rank * localCount;
     qcomp* amps       = q.cpuAmps;
@@ -105,7 +96,8 @@ static void dump_and_check(Qureg q, int nQ, const char* host, const char* gzPath
     fprintf(sv,
         "# QuEST statevector  rank=%d/%d  host=%s  numQubits=%d  startIdx=%lld  count=%lld  precision=complex128\n"
         "# columns: global_index real imag\n",
-        q.rank, q.numNodes, host, nQ, (long long)localStart, (long long)localCount);
+        q.rank, q.numNodes, host, q.numQubits,
+        (long long)localStart, (long long)localCount);
 
     char* txt = malloc((size_t)LINE_BUDGET * BATCH);
     if (!txt) { fprintf(stderr,"OOM\n"); exit(1); }
@@ -115,13 +107,15 @@ static void dump_and_check(Qureg q, int nQ, const char* host, const char* gzPath
 
     for (qindex base = 0; base < localCount; base += BATCH) {
         qindex chunk = (base + BATCH <= localCount) ? BATCH : (localCount - base);
+        qindex idxBase = localStart + base;
         char* p = txt;
         for (qindex i = 0; i < chunk; i++) {
-            qindex idx = localStart + base + i;
-            double re = creal(amps[base+i]), im = cimag(amps[base+i]);
+            qindex idx  = idxBase + i;
+            qcomp  z    = amps[base + i];
+            double re   = creal(z), im = cimag(z);
             double rRef = (idx == 0 || idx == Ntot - 1) ? invSqrt2 : 0.0;
-            double dr = re - rRef, di = im;
-            double err = sqrt(dr*dr + di*di);
+            double dr = re - rRef;
+            double err = sqrt(dr*dr + im*im);
             if (err > *maxErr) { *maxErr = err; *maxErrIdx = idx; }
 
             if (re == 0.0 && im == 0.0) {
@@ -140,22 +134,21 @@ static void dump_and_check(Qureg q, int nQ, const char* host, const char* gzPath
 }
 
 /* ---- 3. log + evidence + manifest (rank 0 only) ---- */
-static void write_log(const char* path, const char* qasm, const char* outDir,
-                      const char* host, int nQ, long nGates, int numRanks,
-                      Qureg q, double tInit, double tCirc, double tDump, double tTotal,
+static void write_log(const char* path, const char* qasm, const char* host,
+                      Qureg q, long nGates,
+                      double tInit, double tCirc, double tDump, double tTotal,
                       double maxErr, qindex maxErrIdx) {
-    QuESTEnv env = getQuESTEnv();
     time_t tnow = time(NULL); char tbuf[64];
     strftime(tbuf, sizeof tbuf, "%Y-%m-%dT%H:%M:%S%z", localtime(&tnow));
 
     struct utsname un; uname(&un);
-    long cores = sysconf(_SC_NPROCESSORS_ONLN);
-    long pgs = sysconf(_SC_PHYS_PAGES), pgsz = sysconf(_SC_PAGESIZE);
+    long cores  = sysconf(_SC_NPROCESSORS_ONLN);
+    long pgs    = sysconf(_SC_PHYS_PAGES), pgsz = sysconf(_SC_PAGESIZE);
     double ramGiB = (pgs > 0 && pgsz > 0) ? (double)pgs * pgsz / (1024.0*1024.0*1024.0) : 0;
     const char* omp = getenv("OMP_NUM_THREADS"); if (!omp) omp = "(unset)";
 
-    qindex N = (qindex)1 << nQ;
-    int pass = (maxErr <= TOL);
+    qindex N  = (qindex)1 << q.numQubits;
+    int    pass = (maxErr <= TOL);
 
     FILE* L = fopen(path, "w"); if (!L) { perror(path); exit(1); }
     fprintf(L, "timestamp        : %s\n", tbuf);
@@ -169,7 +162,7 @@ static void write_log(const char* path, const char* qasm, const char* outDir,
     fprintf(L, "  OMP_NUM_THREADS: %s\n", omp);
     fprintf(L, "  backend        : %s\n",
             backend_str(q.isMultithreaded, q.isGpuAccelerated, q.isDistributed));
-    fprintf(L, "  MPI ranks      : %d\n\n", numRanks);
+    fprintf(L, "  MPI ranks      : %d\n\n", q.numNodes);
 
     fprintf(L, "[timing (sec)]\n");
     fprintf(L, "  parse + alloc  : %8.3f\n", tInit);
@@ -182,13 +175,12 @@ static void write_log(const char* path, const char* qasm, const char* outDir,
     fprintf(L, "  QuEST version  : %d.%d.%d\n",
             QUEST_VERSION_MAJOR, QUEST_VERSION_MINOR, QUEST_VERSION_PATCH);
     fprintf(L, "  precision      : complex128 (qcomp = %zu B)\n", sizeof(qcomp));
-    fprintf(L, "  qubits / gates : %d / %ld\n", nQ, nGates);
+    fprintf(L, "  qubits / gates : %d / %ld\n", q.numQubits, nGates);
     fprintf(L, "  amps total     : %lld\n", (long long)N);
     fprintf(L, "  reference      : amp[0] = amp[%lld] = 1/sqrt(2), others = 0\n", (long long)(N-1));
     fprintf(L, "  max |amp - ref|: %.3e   at index %lld\n", maxErr, (long long)maxErrIdx);
     fprintf(L, "  tolerance      : %.0e\n", TOL);
     fclose(L);
-    (void) env;
 }
 
 static void write_evidence(const char* outDir, const char* binary, const char* qasm) {
@@ -217,8 +209,7 @@ int main(int argc, char** argv) {
     const char* outDir = argv[2];
 
     initQuESTEnv();
-    QuESTEnv env = getQuESTEnv();
-    int rank = env.rank, isRoot = (rank == 0);
+    int rank = getQuESTEnv().rank, isRoot = (rank == 0);
 
     char host[256] = "?"; gethostname(host, sizeof host);
 
@@ -229,15 +220,15 @@ int main(int argc, char** argv) {
 
     double tStart = now();
 
-    int    nQ = 0; long nGates = 0;
+    long   nGates = 0;
     double tInit, tCirc, tDump, maxErr;
     qindex maxErrIdx;
 
-    Qureg q = parse_and_run(qasm, &nQ, &nGates, &tInit, &tCirc);
+    Qureg q = parse_and_run(qasm, &nGates, &tInit, &tCirc);
 
     char svPath[1024];
     snprintf(svPath, sizeof svPath, "%s/statevector.rank%04d.txt.gz", outDir, rank);
-    dump_and_check(q, nQ, host, svPath, &tDump, &maxErr, &maxErrIdx);
+    dump_and_check(q, host, svPath, &tDump, &maxErr, &maxErrIdx);
 
     /* reduce to rank 0 */
 #ifdef USE_MPI
@@ -258,13 +249,13 @@ int main(int argc, char** argv) {
 
     if (isRoot) {
         char logPath[1024]; snprintf(logPath, sizeof logPath, "%s/log.txt", outDir);
-        write_log(logPath, qasm, outDir, host, nQ, nGates, env.numNodes,
-                  q, tInit, tCirc, tDump, tTotal, maxErr, maxErrIdx);
+        write_log(logPath, qasm, host, q, nGates,
+                  tInit, tCirc, tDump, tTotal, maxErr, maxErrIdx);
         write_evidence(outDir, argv[0], qasm);
 
         int pass = (maxErr <= TOL);
         printf("output  : %s\nranks   : %d\nbackend : %s\nmax err : %.3e\nresult  : %s\n",
-               outDir, env.numNodes,
+               outDir, q.numNodes,
                backend_str(q.isMultithreaded, q.isGpuAccelerated, q.isDistributed),
                maxErr, pass ? "PASS" : "FAIL");
     }
