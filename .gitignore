@@ -1,0 +1,13 @@
+# third-party (auto-cloned by build.sh, pinned to v4.2.0)
+QuEST/
+
+# build artefacts
+QC_test_GHZ
+*.o
+*.dylib
+*.so
+
+# benchmark outputs
+out_*/
+runs/
+exp/
