@@ -1,8 +1,8 @@
-// GHZ state on 38 qubits, OpenQASM 2.0
+// GHZ state on 36 qubits, OpenQASM 2.0
 OPENQASM 2.0;
 include "qelib1.inc";
-qreg q[38];
-creg c[38];
+qreg q[36];
+creg c[36];
 h q[0];
 cx q[0],q[1];
 cx q[0],q[2];
@@ -39,6 +39,4 @@ cx q[0],q[32];
 cx q[0],q[33];
 cx q[0],q[34];
 cx q[0],q[35];
-cx q[0],q[36];
-cx q[0],q[37];
 measure q -> c;
